@@ -1,6 +1,6 @@
 import { useState, useEffect } from 'react';
-import { supabase } from '../supabase';
-import { UserPlus, Search, CheckCircle, Clock, CreditCard, RefreshCw, Ticket } from 'lucide-react';
+import { supabase } from '../supabaseClient';
+import { UserPlus, Search, CheckCircle, Clock, CreditCard, RefreshCw, Ticket, Trash2 } from 'lucide-react';
 import TicketModal from './TicketModal';
 
 export default function AttendeeManager({ currentUser }) {
@@ -58,15 +58,21 @@ export default function AttendeeManager({ currentUser }) {
   };
 
   const generateTicketForAttendee = async (attendeeId) => {
-    const { data: ticketNumber } = await supabase.rpc('get_next_ticket_number');
-    const formattedNumber = ticketNumber || `ENG-2026-${Math.floor(1000 + Math.random() * 9000)}`;
+    let formattedNumber = `ENG-2026-${Math.floor(1000 + Math.random() * 9000)}`;
+
+    try {
+      const { data: ticketNumber } = await supabase.rpc('get_next_ticket_number');
+      if (ticketNumber) formattedNumber = ticketNumber;
+    } catch (e) {
+      console.warn('RPC ticket number fallback used:', e);
+    }
 
     const { error: ticketError } = await supabase
       .from('tickets')
       .insert({
         attendee_id: attendeeId,
         ticket_number: formattedNumber,
-        issued_by: currentUser.id,
+        issued_by: currentUser?.id || null,
         status: 'VALID',
       });
 
@@ -89,7 +95,7 @@ export default function AttendeeManager({ currentUser }) {
         payment_reference: paymentReference.trim() || null,
         payment_status: paymentStatus,
         payment_confirmed_at: paymentStatus === 'CONFIRMED' ? new Date().toISOString() : null,
-        created_by: currentUser.id,
+        created_by: currentUser?.id || null,
       })
       .select()
       .single();
@@ -140,6 +146,32 @@ export default function AttendeeManager({ currentUser }) {
     await fetchAttendees();
   };
 
+  const handleDeleteAttendee = async (attendeeId, attendeeName) => {
+    const confirmDelete = window.confirm(
+      `Are you sure you want to delete ${attendeeName}? This will remove their record and associated tickets.`
+    );
+    if (!confirmDelete) return;
+
+    setLoading(true);
+
+    // Delete tickets associated with attendee first
+    await supabase.from('tickets').delete().eq('attendee_id', attendeeId);
+
+    // Delete attendee record
+    const { error: deleteError } = await supabase
+      .from('attendees')
+      .delete()
+      .eq('id', attendeeId);
+
+    if (deleteError) {
+      alert(`Delete failed: ${deleteError.message}`);
+    } else {
+      setAttendees(attendees.filter((a) => a.id !== attendeeId));
+    }
+
+    setLoading(false);
+  };
+
   const openTicketModal = (attendee, ticket) => {
     setSelectedAttendee(attendee);
     setSelectedTicket(ticket);
@@ -147,10 +179,10 @@ export default function AttendeeManager({ currentUser }) {
 
   const filteredAttendees = attendees.filter((att) => {
     const matchesSearch =
-      att.full_name.toLowerCase().includes(searchTerm.toLowerCase()) ||
-      att.phone_number.includes(searchTerm) ||
+      (att.full_name && att.full_name.toLowerCase().includes(searchTerm.toLowerCase())) ||
+      (att.phone_number && att.phone_number.includes(searchTerm)) ||
       (att.payment_reference && att.payment_reference.toLowerCase().includes(searchTerm.toLowerCase())) ||
-      (att.tickets && att.tickets.some((t) => t.ticket_number.toLowerCase().includes(searchTerm.toLowerCase())));
+      (att.tickets && att.tickets.some((t) => t.ticket_number && t.ticket_number.toLowerCase().includes(searchTerm.toLowerCase())));
 
     if (filterStatus === 'ALL') return matchesSearch;
     return matchesSearch && att.payment_status === filterStatus;
@@ -173,7 +205,7 @@ export default function AttendeeManager({ currentUser }) {
       {/* SECTION 1: ATTENDEE REGISTRATION FORM */}
       <div style={styles.card}>
         <h3 style={styles.cardTitle}>
-          <UserPlus size={20} style={{ marginRight: 8 }} /> Register New Attendee
+          <UserPlus size={18} style={{ marginRight: 8 }} /> Register New Attendee
         </h3>
 
         {message && (
@@ -219,7 +251,7 @@ export default function AttendeeManager({ currentUser }) {
           </div>
 
           <div style={styles.inputGroup}>
-            <label style={styles.label}>Payment Reference (M-Pesa Code / Receipt)</label>
+            <label style={styles.label}>Payment Ref (M-Pesa Code)</label>
             <input
               type="text"
               placeholder="e.g. QX789JKL01"
@@ -241,7 +273,7 @@ export default function AttendeeManager({ currentUser }) {
             </select>
           </div>
 
-          <div style={{ gridColumn: '1 / -1', marginTop: '0.5rem' }}>
+          <div style={{ gridColumn: '1 / -1', marginTop: '0.25rem' }}>
             <button type="submit" disabled={submitting} style={styles.submitBtn}>
               {submitting ? 'Processing...' : 'Register Attendee'}
             </button>
@@ -249,17 +281,17 @@ export default function AttendeeManager({ currentUser }) {
         </form>
       </div>
 
-      {/* SECTION 2: ATTENDEE TABLE */}
-      <div style={{ ...styles.card, marginTop: '2rem' }}>
+      {/* SECTION 2: EXCEL-STYLE ATTENDEE TABLE */}
+      <div style={{ ...styles.card, marginTop: '1rem' }}>
         <div style={styles.tableHeader}>
           <h3 style={styles.cardTitle}>Registered Attendees ({filteredAttendees.length})</h3>
 
           <div style={styles.controls}>
             <div style={styles.searchWrapper}>
-              <Search size={16} style={styles.searchIcon} />
+              <Search size={14} style={styles.searchIcon} />
               <input
                 type="text"
-                placeholder="Search name, phone, ticket ID..."
+                placeholder="Search name, phone, ticket..."
                 value={searchTerm}
                 onChange={(e) => setSearchTerm(e.target.value)}
                 style={styles.searchInput}
@@ -271,76 +303,79 @@ export default function AttendeeManager({ currentUser }) {
               onChange={(e) => setFilterStatus(e.target.value)}
               style={styles.filterSelect}
             >
-              <option value="ALL">All Payment Statuses</option>
-              <option value="CONFIRMED">Confirmed Only</option>
-              <option value="PENDING">Pending Only</option>
+              <option value="ALL">All Payments</option>
+              <option value="CONFIRMED">Confirmed</option>
+              <option value="PENDING">Pending</option>
             </select>
 
             <button onClick={fetchAttendees} style={styles.refreshBtn} title="Refresh Table">
-              <RefreshCw size={16} />
+              <RefreshCw size={14} />
             </button>
           </div>
         </div>
 
         {loading ? (
-          <p style={{ padding: '1rem', color: '#94a3b8' }}>Loading records...</p>
+          <p style={{ padding: '1rem', color: '#64748b', fontSize: '13px' }}>Loading records...</p>
         ) : (
-          <div style={{ overflowX: 'auto' }}>
-            <table style={styles.table}>
+          <div style={styles.tableWrapper}>
+            <table style={styles.excelTable}>
               <thead>
                 <tr>
-                  <th style={styles.th}>Name & Contact</th>
-                  <th style={styles.th}>Payment Reference</th>
-                  <th style={styles.th}>Payment Status</th>
-                  <th style={styles.th}>Ticket Number</th>
-                  <th style={styles.th}>Actions</th>
+                  <th style={{ width: '35px' }}>#</th>
+                  <th style={{ width: '180px' }}>Name & Contact</th>
+                  <th style={{ width: '110px' }}>Payment Ref</th>
+                  <th style={{ width: '100px' }}>Status</th>
+                  <th style={{ width: '110px' }}>Ticket No.</th>
+                  <th style={{ width: '150px', textAlign: 'center' }}>Actions</th>
                 </tr>
               </thead>
               <tbody>
                 {filteredAttendees.length === 0 ? (
                   <tr>
-                    <td colSpan="5" style={{ ...styles.td, textAlign: 'center', color: '#64748b' }}>
+                    <td colSpan="6" style={{ textAlign: 'center', padding: '16px', color: '#64748b' }}>
                       No attendees found.
                     </td>
                   </tr>
                 ) : (
-                  filteredAttendees.map((att) => (
-                    <tr key={att.id} style={styles.tr}>
-                      <td style={styles.td}>
-                        <div style={{ fontWeight: 'bold', color: '#f8fafc' }}>{att.full_name}</div>
-                        <div style={{ fontSize: '0.8rem', color: '#94a3b8' }}>
+                  filteredAttendees.map((att, idx) => (
+                    <tr key={att.id}>
+                      <td style={{ textAlign: 'center' }}>{idx + 1}</td>
+                      <td style={styles.cellTruncate}>
+                        <div style={{ fontWeight: '600', color: '#111827' }}>{att.full_name}</div>
+                        <div style={{ fontSize: '11px', color: '#6b7280' }}>
                           {att.phone_number} {att.email ? `• ${att.email}` : ''}
                         </div>
                       </td>
-                      <td style={styles.td}>
+                      <td style={styles.cellTruncate}>
                         <code style={styles.code}>{att.payment_reference || 'N/A'}</code>
                       </td>
-                      <td style={styles.td}>
+                      <td>
                         {att.payment_status === 'CONFIRMED' ? (
                           <span style={styles.badgeSuccess}>
-                            <CheckCircle size={12} style={{ marginRight: 4 }} /> CONFIRMED
+                            <CheckCircle size={11} style={{ marginRight: 3 }} /> CONFIRMED
                           </span>
                         ) : (
                           <span style={styles.badgePending}>
-                            <Clock size={12} style={{ marginRight: 4 }} /> PENDING
+                            <Clock size={11} style={{ marginRight: 3 }} /> PENDING
                           </span>
                         )}
                       </td>
-                      <td style={styles.td}>
+                      <td>
                         {att.tickets && att.tickets.length > 0 ? (
                           <span style={styles.ticketBadge}>{att.tickets[0].ticket_number}</span>
                         ) : (
-                          <span style={{ color: '#64748b', fontSize: '0.85rem' }}>No Ticket</span>
+                          <span style={{ color: '#9ca3af', fontSize: '11px' }}>No Ticket</span>
                         )}
                       </td>
-                      <td style={styles.td}>
-                        <div style={{ display: 'flex', gap: '0.5rem', alignItems: 'center' }}>
+                      <td>
+                        <div style={{ display: 'flex', gap: '4px', justifyContent: 'center' }}>
                           {att.payment_status === 'PENDING' && (
                             <button
                               onClick={() => handleConfirmPayment(att.id)}
                               style={styles.actionBtn}
+                              title="Confirm Payment & Issue Ticket"
                             >
-                              <CreditCard size={14} style={{ marginRight: 4 }} /> Confirm Payment
+                              <CreditCard size={12} style={{ marginRight: 2 }} /> Confirm
                             </button>
                           )}
 
@@ -348,11 +383,19 @@ export default function AttendeeManager({ currentUser }) {
                             <button
                               onClick={() => openTicketModal(att, att.tickets[0])}
                               style={styles.viewTicketBtn}
-                              title="View & Download Digital Ticket"
+                              title="View & Download Ticket"
                             >
-                              <Ticket size={14} style={{ marginRight: 4 }} /> View Ticket
+                              <Ticket size={12} style={{ marginRight: 2 }} /> Ticket
                             </button>
                           )}
+
+                          <button
+                            onClick={() => handleDeleteAttendee(att.id, att.full_name)}
+                            style={styles.deleteBtn}
+                            title="Delete Attendee"
+                          >
+                            <Trash2 size={12} />
+                          </button>
                         </div>
                       </td>
                     </tr>
@@ -368,54 +411,186 @@ export default function AttendeeManager({ currentUser }) {
 }
 
 const styles = {
-  container: { marginTop: '1.5rem' },
-  card: { backgroundColor: '#1e293b', padding: '1.5rem', borderRadius: '10px' },
-  cardTitle: { margin: 0, color: '#38bdf8', display: 'flex', alignItems: 'center' },
-  formGrid: { display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(220px, 1fr))', gap: '1rem', marginTop: '1rem' },
-  inputGroup: { display: 'flex', flexDirection: 'column', gap: '0.3rem' },
-  label: { fontSize: '0.85rem', color: '#cbd5e1' },
+  container: { width: '100%', margin: '0 auto', padding: '0' },
+  card: {
+    backgroundColor: '#ffffff',
+    padding: '1rem',
+    border: '1px solid #111827',
+    borderRadius: '4px',
+  },
+  cardTitle: {
+    margin: 0,
+    color: '#111827',
+    fontSize: '15px',
+    fontWeight: '700',
+    display: 'flex',
+    alignItems: 'center',
+  },
+  formGrid: {
+    display: 'grid',
+    gridTemplateColumns: 'repeat(auto-fit, minmax(200px, 1fr))',
+    gap: '0.75rem',
+    marginTop: '0.75rem',
+  },
+  inputGroup: { display: 'flex', flexDirection: 'column', gap: '0.2rem' },
+  label: { fontSize: '12px', fontWeight: '600', color: '#374151' },
   input: {
-    padding: '0.6rem',
-    borderRadius: '6px',
-    border: '1px solid #334155',
-    backgroundColor: '#0f172a',
-    color: '#fff',
-    fontSize: '0.9rem',
+    padding: '7px 9px',
+    borderRadius: '3px',
+    border: '1px solid #111827',
+    backgroundColor: '#ffffff',
+    color: '#111827',
+    fontSize: '13px',
     outline: 'none',
   },
   submitBtn: {
-    padding: '0.75rem 1.5rem',
-    backgroundColor: '#0284c7',
-    color: '#fff',
+    padding: '9px 16px',
+    backgroundColor: '#111827',
+    color: '#ffffff',
     border: 'none',
-    borderRadius: '6px',
-    fontWeight: 'bold',
+    borderRadius: '3px',
+    fontWeight: '700',
+    fontSize: '13px',
     cursor: 'pointer',
   },
-  tableHeader: { display: 'flex', justifyContent: 'space-between', alignItems: 'center', flexWrap: 'wrap', gap: '1rem', marginBottom: '1rem' },
-  controls: { display: 'flex', gap: '0.5rem', alignItems: 'center' },
-  searchWrapper: { position: 'relative', display: 'flex', alignItems: 'center' },
-  searchIcon: { position: 'absolute', left: '10px', color: '#64748b' },
-  searchInput: {
-    padding: '0.5rem 0.5rem 0.5rem 2.2rem',
-    borderRadius: '6px',
-    border: '1px solid #334155',
-    backgroundColor: '#0f172a',
-    color: '#fff',
-    fontSize: '0.85rem',
+  tableHeader: {
+    display: 'flex',
+    justify: 'space-between',
+    alignItems: 'center',
+    flexWrap: 'wrap',
+    gap: '0.5rem',
+    marginBottom: '0.75rem',
   },
-  filterSelect: { padding: '0.5rem', borderRadius: '6px', border: '1px solid #334155', backgroundColor: '#0f172a', color: '#fff', fontSize: '0.85rem' },
-  refreshBtn: { padding: '0.5rem', borderRadius: '6px', border: '1px solid #334155', backgroundColor: '#0f172a', color: '#cbd5e1', cursor: 'pointer' },
-  table: { width: '100%', borderCollapse: 'collapse', marginTop: '0.5rem' },
-  th: { textAlign: 'left', padding: '0.75rem', borderBottom: '1px solid #334155', color: '#94a3b8', fontSize: '0.85rem' },
-  td: { padding: '0.75rem', borderBottom: '1px solid #334155', fontSize: '0.9rem' },
-  tr: { borderBottom: '1px solid #334155' },
-  code: { backgroundColor: '#0f172a', padding: '0.2rem 0.4rem', borderRadius: '4px', fontSize: '0.8rem', color: '#fbbf24' },
-  badgeSuccess: { display: 'inline-flex', alignItems: 'center', padding: '0.25rem 0.5rem', borderRadius: '4px', backgroundColor: 'rgba(34, 197, 94, 0.1)', color: '#4ade80', fontSize: '0.8rem', fontWeight: 'bold' },
-  badgePending: { display: 'inline-flex', alignItems: 'center', padding: '0.25rem 0.5rem', borderRadius: '4px', backgroundColor: 'rgba(234, 179, 8, 0.1)', color: '#facc15', fontSize: '0.8rem', fontWeight: 'bold' },
-  ticketBadge: { backgroundColor: '#0284c7', color: '#fff', padding: '0.2rem 0.5rem', borderRadius: '4px', fontSize: '0.8rem', fontWeight: 'bold' },
-  actionBtn: { display: 'inline-flex', alignItems: 'center', padding: '0.4rem 0.75rem', backgroundColor: '#16a34a', color: '#fff', border: 'none', borderRadius: '4px', cursor: 'pointer', fontSize: '0.8rem', fontWeight: 'bold' },
-  viewTicketBtn: { display: 'inline-flex', alignItems: 'center', padding: '0.4rem 0.75rem', backgroundColor: '#0284c7', color: '#fff', border: 'none', borderRadius: '4px', cursor: 'pointer', fontSize: '0.8rem', fontWeight: 'bold' },
-  errorBanner: { padding: '0.75rem', backgroundColor: 'rgba(239, 68, 68, 0.1)', color: '#f87171', borderRadius: '6px', marginBottom: '1rem', fontSize: '0.9rem' },
-  successBanner: { padding: '0.75rem', backgroundColor: 'rgba(34, 197, 94, 0.1)', color: '#4ade80', borderRadius: '6px', marginBottom: '1rem', fontSize: '0.9rem' },
+  controls: { display: 'flex', gap: '0.4rem', alignItems: 'center' },
+  searchWrapper: { position: 'relative', display: 'flex', alignItems: 'center' },
+  searchIcon: { position: 'absolute', left: '8px', color: '#6b7280' },
+  searchInput: {
+    padding: '6px 6px 6px 1.8rem',
+    borderRadius: '3px',
+    border: '1px solid #111827',
+    backgroundColor: '#ffffff',
+    color: '#111827',
+    fontSize: '12px',
+  },
+  filterSelect: {
+    padding: '6px',
+    borderRadius: '3px',
+    border: '1px solid #111827',
+    backgroundColor: '#ffffff',
+    color: '#111827',
+    fontSize: '12px',
+  },
+  refreshBtn: {
+    padding: '6px 8px',
+    borderRadius: '3px',
+    border: '1px solid #111827',
+    backgroundColor: '#ffffff',
+    color: '#111827',
+    cursor: 'pointer',
+    display: 'flex',
+    alignItems: 'center',
+  },
+  tableWrapper: { overflowX: 'auto', border: '1px solid #111827' },
+  excelTable: {
+    width: '100%',
+    borderCollapse: 'collapse',
+    fontSize: '12px',
+    color: '#111827',
+    backgroundColor: '#ffffff',
+  },
+  cellTruncate: {
+    maxWidth: '160px',
+    whiteSpace: 'nowrap',
+    overflow: 'hidden',
+    textOverflow: 'ellipsis',
+  },
+  code: {
+    backgroundColor: '#f3f4f6',
+    padding: '2px 4px',
+    borderRadius: '2px',
+    fontSize: '11px',
+    color: '#111827',
+    border: '1px solid #e5e7eb',
+  },
+  badgeSuccess: {
+    display: 'inline-flex',
+    alignItems: 'center',
+    padding: '2px 6px',
+    borderRadius: '2px',
+    backgroundColor: '#dcfce7',
+    color: '#15803d',
+    fontSize: '11px',
+    fontWeight: '700',
+  },
+  badgePending: {
+    display: 'inline-flex',
+    alignItems: 'center',
+    padding: '2px 6px',
+    borderRadius: '2px',
+    backgroundColor: '#fef9c3',
+    color: '#a16207',
+    fontSize: '11px',
+    fontWeight: '700',
+  },
+  ticketBadge: {
+    backgroundColor: '#2563eb',
+    color: '#ffffff',
+    padding: '2px 6px',
+    borderRadius: '2px',
+    fontSize: '11px',
+    fontWeight: '700',
+  },
+  actionBtn: {
+    display: 'inline-flex',
+    alignItems: 'center',
+    padding: '4px 8px',
+    backgroundColor: '#16a34a',
+    color: '#ffffff',
+    border: 'none',
+    borderRadius: '2px',
+    cursor: 'pointer',
+    fontSize: '11px',
+    fontWeight: '700',
+  },
+  viewTicketBtn: {
+    display: 'inline-flex',
+    alignItems: 'center',
+    padding: '4px 8px',
+    backgroundColor: '#2563eb',
+    color: '#ffffff',
+    border: 'none',
+    borderRadius: '2px',
+    cursor: 'pointer',
+    fontSize: '11px',
+    fontWeight: '700',
+  },
+  deleteBtn: {
+    display: 'inline-flex',
+    alignItems: 'center',
+    padding: '4px 6px',
+    backgroundColor: '#dc2626',
+    color: '#ffffff',
+    border: 'none',
+    borderRadius: '2px',
+    cursor: 'pointer',
+    fontSize: '11px',
+  },
+  errorBanner: {
+    padding: '8px 12px',
+    backgroundColor: '#fef2f2',
+    color: '#b91c1c',
+    border: '1px solid #fca5a5',
+    borderRadius: '3px',
+    marginBottom: '0.75rem',
+    fontSize: '12px',
+  },
+  successBanner: {
+    padding: '8px 12px',
+    backgroundColor: '#f0fdf4',
+    color: '#15803d',
+    border: '1px solid #86efac',
+    borderRadius: '3px',
+    marginBottom: '0.75rem',
+    fontSize: '12px',
+  },
 };
