@@ -1,7 +1,15 @@
 import { useState, useEffect } from 'react';
 import { supabase } from '../supabase';
-import { UserPlus, Search, CheckCircle, Clock, CreditCard, RefreshCw, Ticket, Trash2 } from 'lucide-react';
+import { UserPlus, Search, CheckCircle, Clock, CreditCard, RefreshCw, Ticket, Trash2, Download } from 'lucide-react';
 import TicketModal from './TicketModal';
+
+const TICKET_PACKAGES = {
+  SINGLE: { label: 'Single Pass', price: 900, guests: 1, badge: 'CLASSY PASS' },
+  COUPLE: { label: 'Couple Pass', price: 1700, guests: 2, badge: 'DUO COUPLE PASS' },
+  GROUP5: { label: 'Group of 5 Squad', price: 4000, guests: 5, badge: 'SQUAD TABLE PASS' },
+  VIP: { label: 'VIP Gala Pass', price: 1200, guests: 1, badge: 'VIP GALA PASS' },
+  VVIP: { label: 'VVIP Executive Pass', price: 1500, guests: 1, badge: 'VVIP EXECUTIVE PASS' }
+};
 
 export default function AttendeeManager({ currentUser }) {
   const [attendees, setAttendees] = useState([]);
@@ -14,17 +22,30 @@ export default function AttendeeManager({ currentUser }) {
   const [selectedTicket, setSelectedTicket] = useState(null);
 
   // Form state
-  const [fullName, setFullName] = useState('');
+  const [ticketType, setTicketType] = useState('SINGLE');
+  const [guestNames, setGuestNames] = useState(['']);
   const [phoneNumber, setPhoneNumber] = useState('');
   const [email, setEmail] = useState('');
   const [paymentReference, setPaymentReference] = useState('');
   const [paymentStatus, setPaymentStatus] = useState('PENDING');
+  const [amountPaid, setAmountPaid] = useState('900');
   const [submitting, setSubmitting] = useState(false);
   const [message, setMessage] = useState(null);
 
   useEffect(() => {
     fetchAttendees();
   }, []);
+
+  // Update guest inputs and default price when package changes
+  useEffect(() => {
+    const pkg = TICKET_PACKAGES[ticketType];
+    setGuestNames(prev => {
+      const updated = [...prev];
+      while (updated.length < pkg.guests) updated.push('');
+      return updated.slice(0, pkg.guests);
+    });
+    setAmountPaid(pkg.price.toString());
+  }, [ticketType]);
 
   const fetchAttendees = async () => {
     setLoading(true);
@@ -57,6 +78,12 @@ export default function AttendeeManager({ currentUser }) {
     setLoading(false);
   };
 
+  const handleGuestNameChange = (index, value) => {
+    const updated = [...guestNames];
+    updated[index] = value;
+    setGuestNames(updated);
+  };
+
   const generateTicketForAttendee = async (attendeeId) => {
     let formattedNumber = `ENG-2026-${Math.floor(1000 + Math.random() * 9000)}`;
 
@@ -86,32 +113,61 @@ export default function AttendeeManager({ currentUser }) {
     setSubmitting(true);
     setMessage(null);
 
-    const { data: attendee, error: attendeeError } = await supabase
-      .from('attendees')
-      .insert({
-        full_name: fullName.trim(),
-        phone_number: phoneNumber.trim(),
-        email: email.trim() || null,
-        payment_reference: paymentReference.trim() || null,
-        payment_status: paymentStatus,
-        payment_confirmed_at: paymentStatus === 'CONFIRMED' ? new Date().toISOString() : null,
-        created_by: currentUser?.id || null,
-      })
-      .select()
-      .single();
-
-    if (attendeeError) {
-      setMessage({ type: 'error', text: attendeeError.message });
+    if (guestNames.some(n => !n.trim())) {
+      setMessage({ type: 'error', text: 'Please fill in names for all guests in this package.' });
       setSubmitting(false);
       return;
     }
 
-    if (paymentStatus === 'CONFIRMED') {
-      await generateTicketForAttendee(attendee.id);
+    const pkg = TICKET_PACKAGES[ticketType];
+    const totalPaid = parseFloat(amountPaid) || 0;
+    const paidPerGuest = totalPaid / pkg.guests;
+    const allNamesStr = guestNames.join(', ');
+    const groupId = pkg.guests > 1 ? `GRP-${Math.random().toString(36).substring(2, 8).toUpperCase()}` : null;
+
+    let registeredCount = 0;
+
+    for (let i = 0; i < guestNames.length; i++) {
+      const name = guestNames[i].trim();
+
+      const { data: attendee, error: attendeeError } = await supabase
+        .from('attendees')
+        .insert({
+          full_name: name,
+          phone_number: phoneNumber.trim(),
+          email: email.trim() || null,
+          payment_reference: paymentReference.trim() || null,
+          payment_status: paymentStatus,
+          payment_confirmed_at: paymentStatus === 'CONFIRMED' ? new Date().toISOString() : null,
+          ticket_type: pkg.label,
+          badge_type: pkg.badge,
+          amount_paid: paidPerGuest,
+          group_id: groupId,
+          group_all_names: pkg.guests > 1 ? allNamesStr : null,
+          created_by: currentUser?.id || null,
+        })
+        .select()
+        .single();
+
+      if (attendeeError) {
+        setMessage({ type: 'error', text: attendeeError.message });
+        setSubmitting(false);
+        return;
+      }
+
+      if (paymentStatus === 'CONFIRMED') {
+        await generateTicketForAttendee(attendee.id);
+      }
+
+      registeredCount++;
     }
 
-    setMessage({ type: 'success', text: `Attendee ${fullName} registered successfully!` });
-    setFullName('');
+    setMessage({
+      type: 'success',
+      text: `${registeredCount} attendee(s) registered under ${pkg.label} successfully!`
+    });
+
+    setGuestNames(Array(pkg.guests).fill(''));
     setPhoneNumber('');
     setEmail('');
     setPaymentReference('');
@@ -172,6 +228,32 @@ export default function AttendeeManager({ currentUser }) {
     setLoading(false);
   };
 
+  // Clean CSV Export (Only Attendee Name and Amount Paid)
+  const handleDownloadPaidCSV = () => {
+    const paidList = attendees.filter(a => a.payment_status === 'CONFIRMED' || (a.amount_paid && a.amount_paid > 0));
+
+    if (paidList.length === 0) {
+      alert('No paid records found to export.');
+      return;
+    }
+
+    let csvContent = 'data:text/csv;charset=utf-8,Attendee Name,Amount Paid (KSh)\n';
+
+    paidList.forEach(a => {
+      const cleanName = `"${(a.full_name || 'Anonymous').replace(/"/g, '""')}"`;
+      const amount = a.amount_paid || (a.ticket_type ? (TICKET_PACKAGES[Object.keys(TICKET_PACKAGES).find(k => TICKET_PACKAGES[k].label === a.ticket_type)]?.price || 0) : 0);
+      csvContent += `${cleanName},${amount}\n`;
+    });
+
+    const encodedUri = encodeURI(csvContent);
+    const link = document.createElement('a');
+    link.setAttribute('href', encodedUri);
+    link.setAttribute('download', `Engineering_Gala_Paid_List_${new Date().toISOString().slice(0, 10)}.csv`);
+    document.body.appendChild(link);
+    link.click();
+    document.body.removeChild(link);
+  };
+
   const openTicketModal = (attendee, ticket) => {
     setSelectedAttendee(attendee);
     setSelectedTicket(ticket);
@@ -216,15 +298,18 @@ export default function AttendeeManager({ currentUser }) {
 
         <form onSubmit={handleRegisterAttendee} style={styles.formGrid}>
           <div style={styles.inputGroup}>
-            <label style={styles.label}>Full Name *</label>
-            <input
-              type="text"
-              required
-              placeholder="e.g. Jane Doe"
-              value={fullName}
-              onChange={(e) => setFullName(e.target.value)}
+            <label style={styles.label}>Ticket Package *</label>
+            <select
+              value={ticketType}
+              onChange={(e) => setTicketType(e.target.value)}
               style={styles.input}
-            />
+            >
+              <option value="SINGLE">Single Pass (KSh 900)</option>
+              <option value="COUPLE">Couple Pass (KSh 1,700)</option>
+              <option value="GROUP5">Group of 5 Squad (KSh 4,000)</option>
+              <option value="VIP">VIP Gala Pass (KSh 1,200)</option>
+              <option value="VVIP">VVIP Executive Pass (KSh 1,500)</option>
+            </select>
           </div>
 
           <div style={styles.inputGroup}>
@@ -235,17 +320,6 @@ export default function AttendeeManager({ currentUser }) {
               placeholder="e.g. 0712345678"
               value={phoneNumber}
               onChange={(e) => setPhoneNumber(e.target.value)}
-              style={styles.input}
-            />
-          </div>
-
-          <div style={styles.inputGroup}>
-            <label style={styles.label}>Email Address (Optional)</label>
-            <input
-              type="email"
-              placeholder="e.g. jane@example.com"
-              value={email}
-              onChange={(e) => setEmail(e.target.value)}
               style={styles.input}
             />
           </div>
@@ -262,6 +336,27 @@ export default function AttendeeManager({ currentUser }) {
           </div>
 
           <div style={styles.inputGroup}>
+            <label style={styles.label}>Amount Paid (KSh)</label>
+            <input
+              type="number"
+              value={amountPaid}
+              onChange={(e) => setAmountPaid(e.target.value)}
+              style={styles.input}
+            />
+          </div>
+
+          <div style={styles.inputGroup}>
+            <label style={styles.label}>Email Address (Optional)</label>
+            <input
+              type="email"
+              placeholder="e.g. jane@example.com"
+              value={email}
+              onChange={(e) => setEmail(e.target.value)}
+              style={styles.input}
+            />
+          </div>
+
+          <div style={styles.inputGroup}>
             <label style={styles.label}>Payment Status</label>
             <select
               value={paymentStatus}
@@ -273,9 +368,29 @@ export default function AttendeeManager({ currentUser }) {
             </select>
           </div>
 
+          {/* Dynamic Guest Name Inputs */}
+          <div style={{ gridColumn: '1 / -1', backgroundColor: '#f9fafb', padding: '10px', borderRadius: '4px', border: '1px solid #e5e7eb' }}>
+            <label style={{ ...styles.label, marginBottom: '6px', display: 'block', fontWeight: '700' }}>
+              Guest Names ({guestNames.length} Person/s) *
+            </label>
+            <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(200px, 1fr))', gap: '8px' }}>
+              {guestNames.map((name, idx) => (
+                <input
+                  key={idx}
+                  type="text"
+                  required
+                  placeholder={`Guest ${idx + 1} Full Name`}
+                  value={name}
+                  onChange={(e) => handleGuestNameChange(idx, e.target.value)}
+                  style={styles.input}
+                />
+              ))}
+            </div>
+          </div>
+
           <div style={{ gridColumn: '1 / -1', marginTop: '0.25rem' }}>
             <button type="submit" disabled={submitting} style={styles.submitBtn}>
-              {submitting ? 'Processing...' : 'Register Attendee'}
+              {submitting ? 'Processing...' : 'Register Attendee(s)'}
             </button>
           </div>
         </form>
@@ -287,6 +402,14 @@ export default function AttendeeManager({ currentUser }) {
           <h3 style={styles.cardTitle}>Registered Attendees ({filteredAttendees.length})</h3>
 
           <div style={styles.controls}>
+            <button
+              onClick={handleDownloadPaidCSV}
+              style={styles.exportBtn}
+              title="Export Paid List to CSV"
+            >
+              <Download size={14} style={{ marginRight: 4 }} /> Download Paid List (CSV)
+            </button>
+
             <div style={styles.searchWrapper}>
               <Search size={14} style={styles.searchIcon} />
               <input
@@ -323,6 +446,7 @@ export default function AttendeeManager({ currentUser }) {
                 <tr>
                   <th style={{ width: '35px' }}>#</th>
                   <th style={{ width: '180px' }}>Name & Contact</th>
+                  <th style={{ width: '120px' }}>Package</th>
                   <th style={{ width: '110px' }}>Payment Ref</th>
                   <th style={{ width: '100px' }}>Status</th>
                   <th style={{ width: '110px' }}>Ticket No.</th>
@@ -332,7 +456,7 @@ export default function AttendeeManager({ currentUser }) {
               <tbody>
                 {filteredAttendees.length === 0 ? (
                   <tr>
-                    <td colSpan="6" style={{ textAlign: 'center', padding: '16px', color: '#64748b' }}>
+                    <td colSpan="7" style={{ textAlign: 'center', padding: '16px', color: '#64748b' }}>
                       No attendees found.
                     </td>
                   </tr>
@@ -345,6 +469,11 @@ export default function AttendeeManager({ currentUser }) {
                         <div style={{ fontSize: '11px', color: '#6b7280' }}>
                           {att.phone_number} {att.email ? `• ${att.email}` : ''}
                         </div>
+                      </td>
+                      <td style={styles.cellTruncate}>
+                        <span style={{ fontWeight: '600', color: '#374151', fontSize: '11px' }}>
+                          {att.ticket_type || 'Single Pass'}
+                        </span>
                       </td>
                       <td style={styles.cellTruncate}>
                         <code style={styles.code}>{att.payment_reference || 'N/A'}</code>
@@ -455,13 +584,25 @@ const styles = {
   },
   tableHeader: {
     display: 'flex',
-    justify: 'space-between',
+    justifyContent: 'space-between',
     alignItems: 'center',
     flexWrap: 'wrap',
     gap: '0.5rem',
     marginBottom: '0.75rem',
   },
-  controls: { display: 'flex', gap: '0.4rem', alignItems: 'center' },
+  controls: { display: 'flex', gap: '0.4rem', alignItems: 'center', flexWrap: 'wrap' },
+  exportBtn: {
+    padding: '6px 10px',
+    backgroundColor: '#059669',
+    color: '#ffffff',
+    border: 'none',
+    borderRadius: '3px',
+    fontSize: '12px',
+    fontWeight: '700',
+    cursor: 'pointer',
+    display: 'flex',
+    alignItems: 'center',
+  },
   searchWrapper: { position: 'relative', display: 'flex', alignItems: 'center' },
   searchIcon: { position: 'absolute', left: '8px', color: '#6b7280' },
   searchInput: {

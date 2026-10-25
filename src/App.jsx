@@ -71,7 +71,7 @@ export default function App() {
         {activeTab === 'attendees' ? (
           <AttendeeManager currentUser={session.user} />
         ) : (
-          <GateScanner currentUser={session.user} />
+          <GateScanner user={session.user} currentUser={session.user} />
         )}
       </main>
     </div>
