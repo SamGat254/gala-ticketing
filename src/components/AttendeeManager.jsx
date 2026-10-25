@@ -1,5 +1,5 @@
 import { useState, useEffect } from 'react';
-import { supabase } from '../supabaseClient';
+import { supabase } from '../supabase';
 import { UserPlus, Search, CheckCircle, Clock, CreditCard, RefreshCw, Ticket, Trash2 } from 'lucide-react';
 import TicketModal from './TicketModal';
 
