@@ -8,7 +8,7 @@ export default function GateScanner({ currentUser }) {
   const [isScanning, setIsScanning] = useState(false);
   const [loading, setLoading] = useState(false);
   const [errorMessage, setErrorMessage] = useState('');
-  const scannerRef = useRef(null);
+  const html5QrcodeRef = useRef(null);
 
   useEffect(() => {
     return () => {
@@ -17,12 +17,12 @@ export default function GateScanner({ currentUser }) {
   }, []);
 
   const stopScannerSilently = async () => {
-    if (scannerRef.current && scannerRef.current.isScanning) {
+    if (html5QrcodeRef.current && html5QrcodeRef.current.isScanning) {
       try {
-        await scannerRef.current.stop();
-        scannerRef.current.clear();
+        await html5QrcodeRef.current.stop();
+        html5QrcodeRef.current.clear();
       } catch (err) {
-        console.error('Error stopping camera:', err);
+        console.error('Error stopping camera scanner:', err);
       }
     }
   };
@@ -34,24 +34,28 @@ export default function GateScanner({ currentUser }) {
 
     setTimeout(async () => {
       try {
-        if (!scannerRef.current) {
-          scannerRef.current = new Html5Qrcode('qr-reader-viewport');
+        if (!html5QrcodeRef.current) {
+          html5QrcodeRef.current = new Html5Qrcode('qr-reader-viewport');
         }
 
-        const config = { fps: 15, qrbox: { width: 250, height: 250 } };
+        const config = {
+          fps: 15,
+          qrbox: { width: 250, height: 250 },
+          aspectRatio: 1.0
+        };
 
-        await scannerRef.current.start(
+        await html5QrcodeRef.current.start(
           { facingMode: 'environment' },
           config,
           onScanSuccess,
-          () => {} // Ignore frame read failures
+          () => {} // Ignore unreadable frame warnings
         );
       } catch (err) {
         console.error('Camera startup error:', err);
-        setErrorMessage('Unable to start rear camera. Please ensure HTTPS and camera permissions.');
+        setErrorMessage('Unable to access rear camera. Ensure HTTPS and camera permissions are allowed.');
         setIsScanning(false);
       }
-    }, 150);
+    }, 200);
   };
 
   const onScanSuccess = async (decodedText) => {
@@ -74,7 +78,7 @@ export default function GateScanner({ currentUser }) {
     try {
       const cleanQuery = queryValue.trim();
 
-      // Query 1: Search tickets directly by ticket_number or ID with joined attendee data
+      // Query 1: Search ticket directly by ticket_number or ID with joined attendee data
       let { data: ticket, error: tktError } = await supabase
         .from('tickets')
         .select('*, attendees(*)')
@@ -94,13 +98,13 @@ export default function GateScanner({ currentUser }) {
         if (attError) throw attError;
 
         if (attendee) {
-          const { data: tkt } = await supabase
+          const { data: linkedTicket } = await supabase
             .from('tickets')
             .select('*, attendees(*)')
             .eq('attendee_id', attendee.id)
             .maybeSingle();
 
-          ticket = tkt;
+          ticket = linkedTicket;
         }
       }
 
@@ -189,7 +193,7 @@ export default function GateScanner({ currentUser }) {
 
       {errorMessage && <div style={styles.errorAlert}>{errorMessage}</div>}
 
-      {/* Result Display */}
+      {/* Result Card */}
       {scanResult && (
         <div style={{
           ...styles.resultCard,
