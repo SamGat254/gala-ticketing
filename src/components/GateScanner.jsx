@@ -17,12 +17,16 @@ export default function GateScanner({ currentUser }) {
   }, []);
 
   const stopScannerSilently = async () => {
-    if (html5QrcodeRef.current && html5QrcodeRef.current.isScanning) {
+    if (html5QrcodeRef.current) {
       try {
-        await html5QrcodeRef.current.stop();
+        if (html5QrcodeRef.current.isScanning) {
+          await html5QrcodeRef.current.stop();
+        }
         html5QrcodeRef.current.clear();
       } catch (err) {
         console.error('Error stopping camera scanner:', err);
+      } finally {
+        html5QrcodeRef.current = null;
       }
     }
   };
@@ -34,9 +38,15 @@ export default function GateScanner({ currentUser }) {
 
     setTimeout(async () => {
       try {
-        if (!html5QrcodeRef.current) {
-          html5QrcodeRef.current = new Html5Qrcode('qr-reader-viewport');
+        await stopScannerSilently();
+
+        const viewportElement = document.getElementById('qr-reader-viewport');
+        if (!viewportElement) {
+          setIsScanning(false);
+          return;
         }
+
+        html5QrcodeRef.current = new Html5Qrcode('qr-reader-viewport');
 
         const config = {
           fps: 15,
@@ -55,7 +65,7 @@ export default function GateScanner({ currentUser }) {
         setErrorMessage('Unable to access rear camera. Ensure HTTPS and camera permissions are allowed.');
         setIsScanning(false);
       }
-    }, 200);
+    }, 250);
   };
 
   const onScanSuccess = async (decodedText) => {
@@ -70,6 +80,14 @@ export default function GateScanner({ currentUser }) {
     verifyAndCheckIn(searchInput.trim());
   };
 
+  const normalizePhoneNumber = (phone) => {
+    let clean = phone.replace(/\D/g, '');
+    if (clean.startsWith('254')) {
+      return '0' + clean.slice(3);
+    }
+    return clean;
+  };
+
   const verifyAndCheckIn = async (queryValue) => {
     setLoading(true);
     setErrorMessage('');
@@ -77,34 +95,47 @@ export default function GateScanner({ currentUser }) {
 
     try {
       const cleanQuery = queryValue.trim();
+      const cleanPhone = normalizePhoneNumber(cleanQuery);
 
-      // Check if string matches UUID format (8-4-4-4-12 hex characters)
+      // Check if query matches strict UUID format (8-4-4-4-12 hex string)
       const isUUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(cleanQuery);
 
-      // Step 1: Query tickets table safely
-      let query = supabase.from('tickets').select('*, attendees(*)');
+      let ticket = null;
 
+      // -------------------------------------------------------------
+      // STEP 1: Search Ticket Table by Ticket Number or UUID
+      // -------------------------------------------------------------
       if (isUUID) {
-        // Safe to check primary key `id` alongside `ticket_number`
-        query = query.or(`ticket_number.eq.${cleanQuery},id.eq.${cleanQuery}`);
-      } else {
-        // Search strictly by text column `ticket_number` to prevent UUID syntax crash
-        query = query.eq('ticket_number', cleanQuery);
-      }
-
-      let { data: ticket, error: tktError } = await query.maybeSingle();
-
-      if (tktError) throw tktError;
-
-      // Step 2: If not found by ticket number/ID, search attendee by phone_number
-      if (!ticket) {
-        const { data: attendee, error: attError } = await supabase
-          .from('attendees')
-          .select('id')
-          .eq('phone_number', cleanQuery)
+        const { data: tktByUuid } = await supabase
+          .from('tickets')
+          .select('*, attendees(*)')
+          .eq('id', cleanQuery)
           .maybeSingle();
 
-        if (attError) throw attError;
+        ticket = tktByUuid;
+      }
+
+      if (!ticket) {
+        // Case-insensitive match for ticket_number (e.g. ENG-2026-...)
+        const { data: tktByNumber } = await supabase
+          .from('tickets')
+          .select('*, attendees(*)')
+          .ilike('ticket_number', cleanQuery)
+          .maybeSingle();
+
+        ticket = tktByNumber;
+      }
+
+      // -------------------------------------------------------------
+      // STEP 2: Search Attendees Table by Phone Number (If not found)
+      // -------------------------------------------------------------
+      if (!ticket) {
+        // Search phone_number column using exact or leading-zero normalized format
+        const { data: attendee } = await supabase
+          .from('attendees')
+          .select('id')
+          .or(`phone_number.eq.${cleanQuery},phone_number.eq.${cleanPhone}`)
+          .maybeSingle();
 
         if (attendee) {
           const { data: linkedTicket } = await supabase
@@ -117,6 +148,9 @@ export default function GateScanner({ currentUser }) {
         }
       }
 
+      // -------------------------------------------------------------
+      // STEP 3: Handle Validation Results
+      // -------------------------------------------------------------
       if (!ticket) {
         setScanResult({
           status: 'INVALID',
@@ -136,7 +170,7 @@ export default function GateScanner({ currentUser }) {
         return;
       }
 
-      // Step 3: Mark ticket as USED
+      // Mark Ticket as USED
       const { data: updated, error: updateError } = await supabase
         .from('tickets')
         .update({
@@ -188,7 +222,7 @@ export default function GateScanner({ currentUser }) {
         </button>
       </form>
 
-      {/* Camera Viewport */}
+      {/* Camera Viewport Container */}
       {!scanResult && (
         <div style={styles.scannerBox}>
           <div id="qr-reader-viewport" style={styles.viewport}></div>
