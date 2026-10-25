@@ -48,7 +48,7 @@ export default function GateScanner({ currentUser }) {
           { facingMode: 'environment' },
           config,
           onScanSuccess,
-          () => {} // Ignore unreadable frame warnings
+          () => {} // Ignore frame-by-frame parse warnings
         );
       } catch (err) {
         console.error('Camera startup error:', err);
@@ -78,16 +78,25 @@ export default function GateScanner({ currentUser }) {
     try {
       const cleanQuery = queryValue.trim();
 
-      // Query 1: Search ticket directly by ticket_number or ID with joined attendee data
-      let { data: ticket, error: tktError } = await supabase
-        .from('tickets')
-        .select('*, attendees(*)')
-        .or(`ticket_number.eq.${cleanQuery},id.eq.${cleanQuery}`)
-        .maybeSingle();
+      // Check if string matches UUID format (8-4-4-4-12 hex characters)
+      const isUUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(cleanQuery);
+
+      // Step 1: Query tickets table safely
+      let query = supabase.from('tickets').select('*, attendees(*)');
+
+      if (isUUID) {
+        // Safe to check primary key `id` alongside `ticket_number`
+        query = query.or(`ticket_number.eq.${cleanQuery},id.eq.${cleanQuery}`);
+      } else {
+        // Search strictly by text column `ticket_number` to prevent UUID syntax crash
+        query = query.eq('ticket_number', cleanQuery);
+      }
+
+      let { data: ticket, error: tktError } = await query.maybeSingle();
 
       if (tktError) throw tktError;
 
-      // Query 2: If not found by ticket number, search attendee by phone_number
+      // Step 2: If not found by ticket number/ID, search attendee by phone_number
       if (!ticket) {
         const { data: attendee, error: attError } = await supabase
           .from('attendees')
@@ -127,7 +136,7 @@ export default function GateScanner({ currentUser }) {
         return;
       }
 
-      // Mark ticket as USED
+      // Step 3: Mark ticket as USED
       const { data: updated, error: updateError } = await supabase
         .from('tickets')
         .update({
