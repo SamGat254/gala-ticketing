@@ -2,13 +2,13 @@ import React, { useState, useEffect, useRef } from 'react';
 import { Html5Qrcode } from 'html5-qrcode';
 import { supabase } from '../supabase';
 
-export default function GateScanner({ user }) {
-  const [ticketIdInput, setTicketIdInput] = useState('');
+export default function GateScanner({ currentUser }) {
+  const [searchInput, setSearchInput] = useState('');
   const [scanResult, setScanResult] = useState(null);
   const [isScanning, setIsScanning] = useState(false);
   const [loading, setLoading] = useState(false);
   const [errorMessage, setErrorMessage] = useState('');
-  const html5QrcodeRef = useRef(null);
+  const scannerRef = useRef(null);
 
   useEffect(() => {
     return () => {
@@ -17,106 +17,122 @@ export default function GateScanner({ user }) {
   }, []);
 
   const stopScannerSilently = async () => {
-    if (html5QrcodeRef.current && html5QrcodeRef.current.isScanning) {
+    if (scannerRef.current && scannerRef.current.isScanning) {
       try {
-        await html5QrcodeRef.current.stop();
-        html5QrcodeRef.current.clear();
+        await scannerRef.current.stop();
+        scannerRef.current.clear();
       } catch (err) {
-        console.error('Error stopping scanner:', err);
+        console.error('Error stopping camera:', err);
       }
     }
   };
 
-  const startCameraScanner = async () => {
+  const startCamera = async () => {
     setErrorMessage('');
     setScanResult(null);
     setIsScanning(true);
 
     setTimeout(async () => {
       try {
-        if (!html5QrcodeRef.current) {
-          html5QrcodeRef.current = new Html5Qrcode('qr-reader-viewport');
+        if (!scannerRef.current) {
+          scannerRef.current = new Html5Qrcode('qr-reader-viewport');
         }
 
-        // Auto-select main rear camera & set high FPS for snappy detection
-        const config = { fps: 20, qrbox: { width: 250, height: 250 } };
-        
-        await html5QrcodeRef.current.start(
+        const config = { fps: 15, qrbox: { width: 250, height: 250 } };
+
+        await scannerRef.current.start(
           { facingMode: 'environment' },
           config,
           onScanSuccess,
-          onScanError
+          () => {} // Ignore frame read failures
         );
       } catch (err) {
         console.error('Camera startup error:', err);
-        setErrorMessage('Unable to start back camera. Ensure HTTPS connection & camera permissions.');
+        setErrorMessage('Unable to start rear camera. Please ensure HTTPS and camera permissions.');
         setIsScanning(false);
       }
-    }, 100);
+    }, 150);
   };
 
   const onScanSuccess = async (decodedText) => {
     await stopScannerSilently();
     setIsScanning(false);
-    verifyAndCheckInTicket(decodedText.trim());
-  };
-
-  const onScanError = (error) => {
-    // Ignore minor frame read failures for speed
+    verifyAndCheckIn(decodedText.trim());
   };
 
   const handleManualSearch = (e) => {
     e.preventDefault();
-    if (!ticketIdInput.trim()) return;
-    verifyAndCheckInTicket(ticketIdInput.trim());
+    if (!searchInput.trim()) return;
+    verifyAndCheckIn(searchInput.trim());
   };
 
-  const verifyAndCheckInTicket = async (queryValue) => {
+  const verifyAndCheckIn = async (queryValue) => {
     setLoading(true);
     setErrorMessage('');
     setScanResult(null);
 
     try {
-      // Dual verification: Search by ticket ID or Phone Number / Reg Number
-      const { data: tickets, error } = await supabase
+      const cleanQuery = queryValue.trim();
+
+      // Query 1: Search tickets directly by ticket_number or ID with joined attendee data
+      let { data: ticket, error: tktError } = await supabase
         .from('tickets')
-        .select('*')
-        .or(`id.eq.${queryValue},phone.eq.${queryValue},reg_number.eq.${queryValue}`)
-        .limit(1);
+        .select('*, attendees(*)')
+        .or(`ticket_number.eq.${cleanQuery},id.eq.${cleanQuery}`)
+        .maybeSingle();
 
-      if (error) throw error;
+      if (tktError) throw tktError;
 
-      if (!tickets || tickets.length === 0) {
+      // Query 2: If not found by ticket number, search attendee by phone_number
+      if (!ticket) {
+        const { data: attendee, error: attError } = await supabase
+          .from('attendees')
+          .select('id')
+          .eq('phone_number', cleanQuery)
+          .maybeSingle();
+
+        if (attError) throw attError;
+
+        if (attendee) {
+          const { data: tkt } = await supabase
+            .from('tickets')
+            .select('*, attendees(*)')
+            .eq('attendee_id', attendee.id)
+            .maybeSingle();
+
+          ticket = tkt;
+        }
+      }
+
+      if (!ticket) {
         setScanResult({
           status: 'INVALID',
-          message: 'INVALID TICKET - Not found in database'
+          message: 'INVALID TICKET - No attendee or ticket matches this ID / Phone'
         });
         setLoading(false);
         return;
       }
 
-      const ticket = tickets[0];
-
       if (ticket.status === 'USED') {
         setScanResult({
           status: 'ALREADY_USED',
-          message: `ALREADY USED on ${ticket.scanned_at ? new Date(ticket.scanned_at).toLocaleTimeString() : 'earlier'}`,
+          message: `ALREADY USED at ${ticket.scanned_at ? new Date(ticket.scanned_at).toLocaleTimeString() : 'earlier'}`,
           ticket
         });
         setLoading(false);
         return;
       }
 
-      // Update to USED status
+      // Mark ticket as USED
       const { data: updated, error: updateError } = await supabase
         .from('tickets')
         .update({
           status: 'USED',
           scanned_at: new Date().toISOString(),
-          scanned_by: user?.email || 'Usher Gate'
+          scanned_by: currentUser?.email || 'Gate Usher'
         })
         .eq('id', ticket.id)
-        .select()
+        .select('*, attendees(*)')
         .single();
 
       if (updateError) throw updateError;
@@ -134,38 +150,38 @@ export default function GateScanner({ user }) {
     }
   };
 
-  const resetForNextScan = async () => {
+  const handleNextScan = async () => {
     setScanResult(null);
-    setTicketIdInput('');
+    setSearchInput('');
     setErrorMessage('');
-    startCameraScanner();
+    startCamera();
   };
 
   return (
     <div style={styles.container}>
-      <h2 style={styles.heading}>USHER GATE VALIDATION SCANNER</h2>
+      <h2 style={styles.heading}>GATE TICKET VALIDATION SCANNER</h2>
 
-      {/* Manual Verification by Ticket ID / Phone Number */}
+      {/* Manual Verification Form */}
       <form onSubmit={handleManualSearch} style={styles.manualForm}>
         <input
           type="text"
-          placeholder="Enter Ticket ID, Phone, or Reg No..."
-          value={ticketIdInput}
-          onChange={(e) => setTicketIdInput(e.target.value)}
+          placeholder="Enter Ticket Number, ID, or Phone..."
+          value={searchInput}
+          onChange={(e) => setSearchInput(e.target.value)}
           style={styles.input}
         />
         <button type="submit" disabled={loading} style={styles.verifyBtn}>
-          {loading ? 'Verifying...' : 'Verify Number'}
+          {loading ? 'Checking...' : 'Verify'}
         </button>
       </form>
 
-      {/* Scanner Viewport */}
+      {/* Camera Viewport */}
       {!scanResult && (
         <div style={styles.scannerBox}>
           <div id="qr-reader-viewport" style={styles.viewport}></div>
           {!isScanning && (
-            <button onClick={startCameraScanner} style={styles.startCamBtn}>
-              📷 Open Rear Camera Scanner
+            <button onClick={startCamera} style={styles.startCamBtn}>
+              📷 Open Rear Camera
             </button>
           )}
         </div>
@@ -173,7 +189,7 @@ export default function GateScanner({ user }) {
 
       {errorMessage && <div style={styles.errorAlert}>{errorMessage}</div>}
 
-      {/* Result Cards */}
+      {/* Result Display */}
       {scanResult && (
         <div style={{
           ...styles.resultCard,
@@ -190,13 +206,13 @@ export default function GateScanner({ user }) {
 
           {scanResult.ticket && (
             <div style={styles.ticketDetails}>
-              <p><strong>Name:</strong> {scanResult.ticket.name}</p>
-              <p><strong>Category:</strong> {scanResult.ticket.category || 'Standard'}</p>
-              <p><strong>Ticket ID:</strong> {scanResult.ticket.id}</p>
+              <p><strong>Name:</strong> {scanResult.ticket.attendees?.full_name || 'N/A'}</p>
+              <p><strong>Phone:</strong> {scanResult.ticket.attendees?.phone_number || 'N/A'}</p>
+              <p><strong>Ticket No:</strong> {scanResult.ticket.ticket_number}</p>
             </div>
           )}
 
-          <button onClick={resetForNextScan} style={styles.nextScanBtn}>
+          <button onClick={handleNextScan} style={styles.nextScanBtn}>
             🔄 Scan Next Ticket
           </button>
         </div>
@@ -206,100 +222,16 @@ export default function GateScanner({ user }) {
 }
 
 const styles = {
-  container: {
-    padding: '12px',
-    maxWidth: '600px',
-    margin: '0 auto',
-    fontFamily: 'system-ui, -apple-system, sans-serif'
-  },
-  heading: {
-    fontSize: '18px',
-    fontWeight: '700',
-    textAlign: 'center',
-    margin: '0 0 12px 0',
-    color: '#111827'
-  },
-  manualForm: {
-    display: 'flex',
-    gap: '8px',
-    marginBottom: '16px'
-  },
-  input: {
-    flex: '1',
-    padding: '10px 12px',
-    fontSize: '14px',
-    border: '1px solid #111827',
-    borderRadius: '4px',
-    outline: 'none'
-  },
-  verifyBtn: {
-    padding: '10px 16px',
-    fontSize: '14px',
-    fontWeight: '600',
-    backgroundColor: '#111827',
-    color: '#ffffff',
-    border: 'none',
-    borderRadius: '4px',
-    cursor: 'pointer'
-  },
-  scannerBox: {
-    border: '1px solid #111827',
-    borderRadius: '4px',
-    padding: '8px',
-    textAlign: 'center',
-    backgroundColor: '#ffffff'
-  },
-  viewport: {
-    width: '100%',
-    minHeight: '260px',
-    backgroundColor: '#f9fafb'
-  },
-  startCamBtn: {
-    width: '100%',
-    padding: '12px',
-    fontSize: '15px',
-    fontWeight: '600',
-    backgroundColor: '#2563eb',
-    color: '#ffffff',
-    border: 'none',
-    borderRadius: '4px',
-    cursor: 'pointer',
-    marginTop: '8px'
-  },
-  resultCard: {
-    marginTop: '16px',
-    padding: '16px',
-    border: '2px solid',
-    borderRadius: '4px',
-    textAlign: 'center'
-  },
-  ticketDetails: {
-    textAlign: 'left',
-    fontSize: '14px',
-    margin: '12px 0',
-    padding: '8px',
-    backgroundColor: '#ffffff',
-    border: '1px solid #e5e7eb',
-    borderRadius: '4px'
-  },
-  nextScanBtn: {
-    width: '100%',
-    padding: '12px',
-    fontSize: '15px',
-    fontWeight: '700',
-    backgroundColor: '#111827',
-    color: '#ffffff',
-    border: 'none',
-    borderRadius: '4px',
-    cursor: 'pointer'
-  },
-  errorAlert: {
-    padding: '10px',
-    marginTop: '12px',
-    backgroundColor: '#fef2f2',
-    color: '#b91c1c',
-    border: '1px solid #fca5a5',
-    borderRadius: '4px',
-    fontSize: '13px'
-  }
+  container: { padding: '12px', maxWidth: '600px', margin: '0 auto', fontFamily: 'system-ui, sans-serif' },
+  heading: { fontSize: '18px', fontWeight: '700', textAlign: 'center', marginBottom: '12px', color: '#111827' },
+  manualForm: { display: 'flex', gap: '8px', marginBottom: '16px' },
+  input: { flex: '1', padding: '10px', fontSize: '14px', border: '1px solid #111827', borderRadius: '4px' },
+  verifyBtn: { padding: '10px 16px', fontSize: '14px', fontWeight: '600', backgroundColor: '#111827', color: '#ffffff', border: 'none', borderRadius: '4px', cursor: 'pointer' },
+  scannerBox: { border: '1px solid #111827', borderRadius: '4px', padding: '8px', textAlign: 'center', backgroundColor: '#ffffff' },
+  viewport: { width: '100%', minHeight: '260px', backgroundColor: '#f9fafb' },
+  startCamBtn: { width: '100%', padding: '12px', fontSize: '15px', fontWeight: '600', backgroundColor: '#2563eb', color: '#ffffff', border: 'none', borderRadius: '4px', cursor: 'pointer', marginTop: '8px' },
+  resultCard: { marginTop: '16px', padding: '16px', border: '2px solid', borderRadius: '4px', textAlign: 'center' },
+  ticketDetails: { textAlign: 'left', fontSize: '14px', margin: '12px 0', padding: '8px', backgroundColor: '#ffffff', border: '1px solid #e5e7eb', borderRadius: '4px' },
+  nextScanBtn: { width: '100%', padding: '12px', fontSize: '15px', fontWeight: '700', backgroundColor: '#111827', color: '#ffffff', border: 'none', borderRadius: '4px', cursor: 'pointer' },
+  errorAlert: { padding: '10px', marginTop: '12px', backgroundColor: '#fef2f2', color: '#b91c1c', border: '1px solid #fca5a5', borderRadius: '4px', fontSize: '13px' }
 };
